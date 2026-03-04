@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>シッティング・レッグマスター</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            font-family: 'Arial Black', 'Hiragino Kaku Gothic Pro', 'Meiryo', sans-serif;
+        }
+
+        .container { position: relative; width: 100%; height: 100%; overflow: hidden; }
+        video { display: none; }
+        canvas { width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); }
+
+        .ui-header {
+            position: absolute; top: 15px; width: 100%;
+            display: flex; flex-direction: column; align-items: center; gap: 10px;
+            z-index: 50; pointer-events: none;
+        }
+
+        .info-box {
+            background: rgba(0,0,0,0.85); padding: 8px 30px; border-radius: 12px;
+            font-size: 28px; border: 2px solid; font-weight: bold; min-width: 250px; text-align: center;
+        }
+        #score-display { color: #00ffcc; border-color: #00ffcc; }
+        #timer-display { color: #ff3366; border-color: #ff3366; }
+
+        #command-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; justify-content: center; align-items: center;
+            pointer-events: none; z-index: 20;
+        }
+
+        #command-text {
+            font-size: min(30vh, 50vw);
+            font-weight: 900;
+            color: #00ff00;
+            writing-mode: vertical-rl;
+            text-orientation: upright;
+            text-align: center;
+            line-height: 1.0;
+            text-shadow: 6px 6px 0px #000, -6px -6px 0px #000, 0 0 60px rgba(0,0,0,1);
+        }
+
+        /* オーバーレイ設定 */
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 100; color: white;
+            transition: background 0.5s;
+        }
+        /* 待機・リザルト画面は背景を薄くしてカメラを見せる */
+        .overlay.preview-mode { background: rgba(0,0,0,0.4); }
+        #start-screen { background: rgba(0,0,0,0.8); }
+
+        .btn-start {
+            padding: 20px 50px; font-size: 28px; background: #007bff; color: white;
+            border: none; border-radius: 50px; cursor: pointer; font-weight: bold;
+            box-shadow: 0 0 25px rgba(0,123,255,0.6);
+        }
+
+        #status-msg {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            background: rgba(255,255,0,0.85); color: #000; padding: 12px 24px;
+            border-radius: 30px; font-size: 22px; font-weight: bold; z-index: 60; display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        <div id="status-msg">座標をリセットしました</div>
+
+        <div class="ui-header">
+            <div id="score-display" class="info-box">SCORE: <span id="val-score">0</span></div>
+            <div id="timer-display" class="info-box">TIME: <span id="val-timer">60</span></div>
+        </div>
+
+        <div id="command-container">
+            <div id="command-text"></div>
+        </div>
+
+        <div id="start-screen" class="overlay">
+            <h1 style="font-size: 40px; margin-bottom: 20px;">シッティング・レッグマスター</h1>
+            <button class="btn-start" onclick="initApp()">カメラを起動する</button>
+            <div id="setup-guide" style="margin-top:25px; text-align:center; font-size: 18px; line-height: 1.6;">
+                椅子に座り、膝を肩幅に開いてください。<br>
+                「両手をあげて」→「おろす」でスタート！
+            </div>
+        </div>
+
+        <div id="result-screen" class="overlay" style="display: none;">
+            <h1 id="result-title" style="font-size: 65px; color: #ffcc00; margin-bottom: 10px;">TIME UP</h1>
+            <div style="font-size: 50px; margin-bottom: 30px;">SCORE: <span id="final-score" style="color:#00ff00;">0</span></div>
+            <div style="text-align:center; background: rgba(0,0,0,0.6); padding: 20px; border-radius: 20px;">
+                <span style="color:#00ff00; font-size: 24px; font-weight: bold;">もう一度あそぶ</span><br><br>
+                <span style="font-size: 18px;">
+                    両手をあげて、おろすとカウントダウン開始
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        const commands = ["左前", "左上", "左外", "左内", "右前", "右上", "右外", "右内"];
+        let currentTarget = "";
+        let score = 0;
+        let timeLeft = 60;
+        let gameActive = false;
+        let isWaitingForReturn = false; 
+        let isProcessingSuccess = false; 
+        let waitingForStartDown = false; 
+        let resetTriggered = false; 
+        let timerInterval = null;
+        let appInitialized = false;
+
+        let initialAnklePos = { l: {x:0, y:0}, r: {x:0, y:0} };
+        let initialKneePos = { l: {x:0, y:0}, r: {x:0, y:0} };
+        
+        let handsUpStartTime = null; 
+        const EXIT_HOLD_TIME = 500; // 0.5秒
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const synth = window.speechSynthesis;
+
+        function playSound(freq, duration) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.value = freq;
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function speak(text) {
+            synth.cancel();
+            const uttr = new SpeechSynthesisUtterance(text);
+            uttr.lang = 'ja-JP';
+            uttr.rate = 1.9; 
+            synth.speak(uttr);
+        }
+
+        function recordBasePosition(lm) {
+            initialAnklePos.l = { x: lm[27].x, y: lm[27].y };
+            initialAnklePos.r = { x: lm[28].x, y: lm[28].y };
+            initialKneePos.l = { x: lm[25].x, y: lm[25].y };
+            initialKneePos.r = { x: lm[26].x, y: lm[26].y };
+            
+            const msg = document.getElementById('status-msg');
+            msg.innerText = "座標をリセットしました";
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 1000);
+            playSound(440, 0.1);
+        }
+
+        function startGame(lm) {
+            recordBasePosition(lm);
+            gameActive = true;
+            isProcessingSuccess = false;
+            isWaitingForReturn = false;
+            waitingForStartDown = false;
+            resetTriggered = false;
+            score = 0;
+            timeLeft = 60;
+            document.getElementById('val-score').innerText = score;
+            document.getElementById('val-timer').innerText = timeLeft;
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('result-screen').style.display = 'none';
+            
+            playSound(880, 0.5);
+            nextCommand();
+
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('val-timer').innerText = timeLeft;
+                if (timeLeft <= 0) endGame(false);
+            }, 1000);
+        }
+
+        function nextCommand() {
+            currentTarget = commands[Math.floor(Math.random() * commands.length)];
+            const cmdEl = document.getElementById('command-text');
+            cmdEl.innerText = currentTarget; 
+            cmdEl.style.fontSize = "min(30vh, 50vw)";
+            cmdEl.style.color = "#00ff00"; 
+
+            const voiceMap = {
+                "左前": "ひだりまえ", "左上": "ひだりうえ", "左外": "ひだりそと", "左内": "ひだりうち",
+                "右前": "みぎまえ", "右上": "みぎうえ", "右外": "みぎそと", "右内": "みぎうち"
+            };
+            speak(voiceMap[currentTarget] || currentTarget);
+        }
+
+        function endGame(isAborted = false) {
+            gameActive = false;
+            clearInterval(timerInterval);
+            const resultScreen = document.getElementById('result-screen');
+            resultScreen.style.display = 'flex';
+            resultScreen.classList.add('preview-mode'); // 背景を半透明にしてカメラを見せる
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('command-text').innerText = ""; 
+            speak(isAborted ? "中断します" : "終了です");
+        }
+
+        function onResults(results) {
+            canvasElement.width = results.image.width;
+            canvasElement.height = results.image.height;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // ゲーム中でない（開始前・終了後）ときはカメラ映像を映す
+            if (!gameActive) {
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            } else {
+                canvasCtx.fillStyle = '#000';
+                canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+            }
+
+            if (results.poseLandmarks) {
+                const lm = results.poseLandmarks;
+                drawConnectors(canvasCtx, lm, POSE_CONNECTIONS, {color: gameActive ? '#333' : '#fff', lineWidth: 2});
+
+                const nose = lm[0], lWrist = lm[15], rWrist = lm[16];
+                const lAnkle = lm[27], rAnkle = lm[28];
+                const lKnee = lm[25], rKnee = lm[26];
+
+                const lHandUp = lWrist.y < nose.y;
+                const rHandUp = rWrist.y < nose.y;
+
+                // 中断判定
+                if (gameActive && lHandUp && rHandUp) {
+                    if (handsUpStartTime === null) handsUpStartTime = Date.now();
+                    else if (Date.now() - handsUpStartTime >= EXIT_HOLD_TIME) {
+                        endGame(true);
+                        handsUpStartTime = null;
+                    }
+                } else { handsUpStartTime = null; }
+
+                // 片手リセット (1回のみ)
+                if (gameActive) {
+                    const onlyOneHandUp = (lHandUp && !rHandUp) || (!lHandUp && rHandUp);
+                    if (onlyOneHandUp) {
+                        if (!resetTriggered) {
+                            recordBasePosition(lm);
+                            resetTriggered = true;
+                        }
+                    } else if (!lHandUp && !rHandUp) {
+                        resetTriggered = false;
+                    }
+                }
+
+                // スタート判定
+                if (!gameActive) {
+                    if (lHandUp && rHandUp) {
+                        waitingForStartDown = true;
+                    } else if (waitingForStartDown && !lHandUp && !rHandUp) {
+                        startGame(lm);
+                    }
+                }
+
+                if (gameActive) {
+                    const cmdEl = document.getElementById('command-text');
+
+                    if (isWaitingForReturn) {
+                        let backCondition = false;
+                        if (currentTarget === "左前" || currentTarget === "右前") {
+                            const dy_a_l = initialAnklePos.l.y - lAnkle.y;
+                            const dy_a_r = initialAnklePos.r.y - rAnkle.y;
+                            if (currentTarget === "左前" && dy_a_l < 0.025) backCondition = true;
+                            if (currentTarget === "右前" && dy_a_r < 0.025) backCondition = true;
+                        } 
+                        else {
+                            const isBackY = Math.abs(lKnee.y - initialKneePos.l.y) < 0.04 && 
+                                            Math.abs(rKnee.y - initialKneePos.r.y) < 0.04 &&
+                                            Math.abs(lAnkle.y - initialAnklePos.l.y) < 0.04;
+                            const isBackX = Math.abs(lKnee.x - initialKneePos.l.x) < 0.04 &&
+                                            Math.abs(rKnee.x - initialKneePos.r.x) < 0.04;
+                            if (isBackY && isBackX) backCondition = true;
+                        }
+                        if (backCondition) {
+                            isWaitingForReturn = false;
+                            nextCommand();
+                        }
+                    } 
+                    else if (!isProcessingSuccess) {
+                        let success = false;
+                        const dy_k_l = initialKneePos.l.y - lKnee.y; 
+                        const dy_a_l = initialAnklePos.l.y - lAnkle.y; 
+                        const dy_k_r = initialKneePos.r.y - rKnee.y;
+                        const dy_a_r = initialAnklePos.r.y - rAnkle.y;
+
+                        const THR_UP = 0.08, THR_STAY_FRONT = 0.06, THR_SIDE = 0.06, THR_FRONT_LOOSE = 0.05;
+
+                        switch(currentTarget) {
+                            case "左前": if (dy_a_l > THR_FRONT_LOOSE && dy_k_l < THR_STAY_FRONT) success = true; break;
+                            case "左上": if (dy_k_l > THR_UP && dy_a_l > THR_UP) success = true; break;
+                            case "左外": if (lKnee.x > initialKneePos.l.x + THR_SIDE) success = true; break;
+                            case "左内": if (lKnee.x < initialKneePos.l.x - THR_SIDE) success = true; break;
+                            case "右前": if (dy_a_r > THR_FRONT_LOOSE && dy_k_r < THR_STAY_FRONT) success = true; break;
+                            case "右上": if (dy_k_r > THR_UP && dy_a_r > THR_UP) success = true; break;
+                            case "右外": if (rKnee.x < initialKneePos.r.x - THR_SIDE) success = true; break;
+                            case "右内": if (rKnee.x > initialKneePos.r.x + THR_SIDE) success = true; break;
+                        }
+
+                        if (success) {
+                            isProcessingSuccess = true; 
+                            score++;
+                            document.getElementById('val-score').innerText = score;
+                            playSound(1200, 0.2);
+                            cmdEl.innerText = "OK"; 
+                            cmdEl.style.color = "#ff0000"; 
+                            
+                            setTimeout(() => {
+                                isProcessingSuccess = false;
+                                isWaitingForReturn = true; 
+                                cmdEl.innerText = "戻して";
+                                cmdEl.style.color = "#ffff00";
+                                cmdEl.style.fontSize = "min(20vh, 40vw)";
+                            }, 400);
+                        }
+                    }
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+        pose.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 1280, height: 720
+        });
+
+        function initApp() {
+            if (appInitialized) return;
+            audioCtx.resume();
+            appInitialized = true;
+            document.querySelector('.btn-start').style.display = 'none';
+            camera.start().then(() => {
+                document.getElementById('start-screen').classList.add('preview-mode');
+            });
+        }
+    </script>
+</body>
+</html>
