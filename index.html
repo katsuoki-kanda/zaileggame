@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>シッティング・レッグマスター ver1.5</title>
+    <title>シッティング・レッグマスター ver1.6</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
@@ -139,7 +139,6 @@
         let appInitialized = false;
         let startLockedAfterAbort = false; 
 
-        // 座標管理（つま先 Foot Index を追加）
         let initialAnklePos = { l: {x:0, y:0}, r: {x:0, y:0} };
         let initialToePos = { l: {x:0, y:0}, r: {x:0, y:0} };
         let initialKneePos = { l: {x:0, y:0}, r: {x:0, y:0} };
@@ -171,7 +170,6 @@
         }
 
         function recordBasePosition(lm) {
-            // Ankle: 27, 28 | Knee: 25, 26 | Foot Index (Toe): 31, 32
             initialAnklePos.l = { x: lm[27].x, y: lm[27].y };
             initialAnklePos.r = { x: lm[28].x, y: lm[28].y };
             initialKneePos.l = { x: lm[25].x, y: lm[25].y };
@@ -259,11 +257,11 @@
                 const nose = lm[0], lWrist = lm[15], rWrist = lm[16];
                 const lAnkle = lm[27], rAnkle = lm[28];
                 const lKnee = lm[25], rKnee = lm[26];
-                const lToe = lm[31], rToe = lm[32]; // つま先
+                const lToe = lm[31], rToe = lm[32]; 
 
                 const anyHandUp = (lWrist.y < nose.y) || (rWrist.y < nose.y);
 
-                // --- 手のアクション管理 ---
+                // --- 操作管理 ---
                 if (gameActive) {
                     if (anyHandUp) {
                         if (handsUpStartTime === null) handsUpStartTime = Date.now();
@@ -288,7 +286,7 @@
                     }
                 }
 
-                // --- ゲームロジック ---
+                // --- ゲーム判定ロジック ---
                 if (gameActive) {
                     const cmdEl = document.getElementById('command-text');
 
@@ -297,20 +295,18 @@
                         const TOL = 0.08;
 
                         if (currentTarget === "左前" || currentTarget === "右前") {
-                            // 前：足首の1/2戻り判定
                             const currentAnkleY = (currentTarget === "左前") ? lAnkle.y : rAnkle.y;
                             const initAnkleY = (currentTarget === "左前") ? initialAnklePos.l.y : initialAnklePos.r.y;
                             const thresholdY = initAnkleY - (initAnkleY - successAnkleY) * 0.5;
                             if (currentAnkleY > thresholdY) canGoNext = true;
                         } 
                         else if (currentTarget === "左後" || currentTarget === "右後") {
-                            // 後：つま先のy軸位置が初期位置付近に戻ったか判定
+                            // 後の戻り判定：つま先のy軸が初期位置付近に戻ったか
                             const currentToeY = (currentTarget === "左後") ? lToe.y : rToe.y;
                             const initToeY = (currentTarget === "左後") ? initialToePos.l.y : initialToePos.r.y;
-                            if (Math.abs(currentToeY - initToeY) < 0.05) canGoNext = true;
+                            if (Math.abs(currentToeY - initToeY) < 0.06) canGoNext = true;
                         } 
                         else {
-                            // その他（上・外・内）：膝と足首が初期位置に近いか
                             const isBackL = Math.abs(lKnee.y - initialKneePos.l.y) < TOL && Math.abs(lKnee.x - initialKneePos.l.x) < TOL;
                             const isBackR = Math.abs(rKnee.y - initialKneePos.r.y) < TOL && Math.abs(rKnee.x - initialKneePos.r.x) < TOL;
                             if (isBackL && isBackR) canGoNext = true;
@@ -328,11 +324,14 @@
                         const dy_k_r = initialKneePos.r.y - rKnee.y;
                         const dy_a_r = initialAnklePos.r.y - rAnkle.y;
 
-                        const THR_UP = 0.08, THR_SIDE = 0.07, THR_FRONT = 0.05, THR_BACK_REL = 0.04;
+                        // しきい値の調整
+                        const THR_UP = 0.08, THR_SIDE = 0.07, THR_FRONT = 0.05;
+                        const THR_BACK_REL = 0.02; // 反応しやすくするために0.04から0.02に緩和
+                        const KNEE_LIMIT = 0.06;   // 膝の浮き上がり許容値を0.03から0.06に拡大
 
                         switch(currentTarget) {
                             case "左前": 
-                                if (dy_a_l > THR_FRONT && dy_k_l < 0.03) {
+                                if (dy_a_l > THR_FRONT && dy_k_l < KNEE_LIMIT) {
                                     success = true;
                                     successAnkleY = lAnkle.y;
                                 }
@@ -341,11 +340,11 @@
                             case "左外": if (lKnee.x > initialKneePos.l.x + THR_SIDE) success = true; break;
                             case "左内": if (lKnee.x < initialKneePos.l.x - THR_SIDE) success = true; break;
                             case "左後": 
-                                // つま先が他方の足首より上に位置するかで判定
-                                if (lToe.y < rAnkle.y - THR_BACK_REL && dy_k_l < 0.03) success = true; 
+                                // 引いた足のつま先が、反対の足首より少しでも上(yが小さい)になれば成功
+                                if (lToe.y < rAnkle.y - THR_BACK_REL && dy_k_l < KNEE_LIMIT) success = true; 
                                 break;
                             case "右前": 
-                                if (dy_a_r > THR_FRONT && dy_k_r < 0.03) {
+                                if (dy_a_r > THR_FRONT && dy_k_r < KNEE_LIMIT) {
                                     success = true;
                                     successAnkleY = rAnkle.y;
                                 }
@@ -354,7 +353,7 @@
                             case "右外": if (rKnee.x < initialKneePos.r.x - THR_SIDE) success = true; break;
                             case "右内": if (rKnee.x > initialKneePos.r.x + THR_SIDE) success = true; break;
                             case "右後": 
-                                if (rToe.y < lAnkle.y - THR_BACK_REL && dy_k_r < 0.03) success = true; 
+                                if (rToe.y < lAnkle.y - THR_BACK_REL && dy_k_r < KNEE_LIMIT) success = true; 
                                 break;
                         }
 
