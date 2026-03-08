@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>シッティング・レッグマスター ver1.2</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            font-family: 'Arial Black', 'Hiragino Kaku Gothic Pro', 'Meiryo', sans-serif;
+        }
+
+        .container { position: relative; width: 100%; height: 100%; overflow: hidden; }
+        video { display: none; }
+        canvas { width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); }
+
+        .ui-header {
+            position: absolute; top: 15px; width: 100%;
+            display: flex; flex-direction: column; align-items: center; gap: 10px;
+            z-index: 50; pointer-events: none;
+        }
+
+        .info-box {
+            background: rgba(0,0,0,0.85); padding: 8px 30px; border-radius: 12px;
+            font-size: 28px; border: 2px solid; font-weight: bold; min-width: 250px; text-align: center;
+        }
+        #score-display { color: #00ffcc; border-color: #00ffcc; }
+        #timer-display { color: #ff3366; border-color: #ff3366; }
+
+        #command-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; justify-content: center; align-items: center;
+            pointer-events: none; z-index: 20;
+        }
+
+        #command-text {
+            /* 2文字でUIに重ならない最大サイズ (30vh * 2 = 60vh) */
+            font-size: min(30vh, 80vw);
+            font-weight: 900;
+            color: #00ff00;
+            writing-mode: vertical-rl;
+            text-orientation: upright;
+            text-align: center;
+            line-height: 1.0;
+            text-shadow: 6px 6px 0px #000, -6px -6px 0px #000, 0 0 60px rgba(0,0,0,1);
+        }
+
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 100; color: white;
+            transition: background 0.4s ease;
+        }
+
+        #start-screen { background: rgba(0,0,0,0.95); }
+        .overlay.preview-mode { background: rgba(0,0,0,0.0) !important; }
+
+        .btn-start {
+            padding: 20px 50px; font-size: 28px; background: #007bff; color: white;
+            border: none; border-radius: 50px; cursor: pointer; font-weight: bold;
+            box-shadow: 0 0 25px rgba(0,123,255,0.6);
+            z-index: 110;
+        }
+
+        .guide-box {
+            margin-top: 25px; text-align: center; font-size: 18px; line-height: 1.6;
+            background: rgba(0,0,0,0.7); padding: 15px 30px; border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        #status-msg {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            background: rgba(255,255,0,0.85); color: #000; padding: 12px 24px;
+            border-radius: 30px; font-size: 22px; font-weight: bold; z-index: 60; display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <video id="input_video" playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        <div id="status-msg">座標をリセットしました</div>
+
+        <div class="ui-header">
+            <div id="score-display" class="info-box">SCORE: <span id="val-score">0</span></div>
+            <div id="timer-display" class="info-box">TIME: <span id="val-timer">60</span></div>
+        </div>
+
+        <div id="command-container">
+            <div id="command-text"></div>
+        </div>
+
+        <div id="start-screen" class="overlay">
+            <h1 style="font-size: 40px; margin-bottom: 20px;">シッティング・レッグマスター</h1>
+            <button class="btn-start" onclick="initApp()">カメラを起動する</button>
+            <div id="setup-guide" class="guide-box">
+                椅子に座り、膝を肩幅に開いてください。<br>
+                「片手をあげて」→「おろす」でスタート！
+            </div>
+        </div>
+
+        <div id="result-screen" class="overlay" style="display: none;">
+            <h1 id="result-title" style="font-size: 65px; color: #ffcc00; margin-bottom: 10px;">TIME UP</h1>
+            <div style="font-size: 50px; margin-bottom: 30px;">SCORE: <span id="final-score" style="color:#00ff00;">0</span></div>
+            <div class="guide-box">
+                <span style="color:#00ff00; font-size: 24px; font-weight: bold;">もう一度あそぶ</span><br><br>
+                片手をあげて、おろすとカウントダウン開始
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        const commands = ["左前", "左上", "左外", "左内", "左後", "右前", "右上", "右外", "右内", "右後"];
+        let currentTarget = "";
+        let score = 0;
+        let timeLeft = 60;
+        let gameActive = false;
+        let isWaitingForReturn = false; 
+        let isProcessingSuccess = false; 
+        let waitingForStartDown = false; 
+        let timerInterval = null;
+        let appInitialized = false;
+        let startLockedAfterAbort = false; 
+
+        let initialAnklePos = { l: {x:0, y:0, z:0}, r: {x:0, y:0, z:0} };
+        let initialToePos = { l: {x:0, y:0, z:0}, r: {x:0, y:0, z:0} };
+        let initialKneePos = { l: {x:0, y:0, z:0}, r: {x:0, y:0, z:0} };
+        let successAnkleY = 0; 
+        
+        let handsUpStartTime = null; 
+        let backHoldStartTime = null; 
+        const EXIT_HOLD_TIME = 3000; 
+        const BACK_HOLD_TIME = 200; 
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const synth = window.speechSynthesis;
+
+        function playSound(freq, duration) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.value = freq;
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function speak(text) {
+            synth.cancel();
+            const uttr = new SpeechSynthesisUtterance(text);
+            uttr.lang = 'ja-JP';
+            uttr.rate = 1.9; 
+            synth.speak(uttr);
+        }
+
+        function recordBasePosition(lm) {
+            initialAnklePos.l = { x: lm[27].x, y: lm[27].y, z: lm[27].z };
+            initialAnklePos.r = { x: lm[28].x, y: lm[28].y, z: lm[28].z };
+            initialKneePos.l = { x: lm[25].x, y: lm[25].y, z: lm[25].z };
+            initialKneePos.r = { x: lm[26].x, y: lm[26].y, z: lm[26].z };
+            initialToePos.l = { x: lm[31].x, y: lm[31].y, z: lm[31].z };
+            initialToePos.r = { x: lm[32].x, y: lm[32].y, z: lm[32].z };
+            
+            const msg = document.getElementById('status-msg');
+            msg.innerText = "座標をリセットしました";
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 1000);
+            playSound(440, 0.1);
+        }
+
+        function startGame(lm) {
+            recordBasePosition(lm);
+            gameActive = true;
+            isProcessingSuccess = false;
+            isWaitingForReturn = false;
+            waitingForStartDown = false;
+            backHoldStartTime = null;
+            score = 0;
+            timeLeft = 60;
+            document.getElementById('val-score').innerText = score;
+            document.getElementById('val-timer').innerText = timeLeft;
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('result-screen').style.display = 'none';
+            
+            playSound(880, 0.5);
+            nextCommand();
+
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('val-timer').innerText = timeLeft;
+                if (timeLeft <= 0) endGame(false);
+            }, 1000);
+        }
+
+        function nextCommand() {
+            backHoldStartTime = null; 
+            currentTarget = commands[Math.floor(Math.random() * commands.length)];
+            const cmdEl = document.getElementById('command-text');
+            cmdEl.innerText = currentTarget; 
+            // 出題(2文字): スコア表示と重ならないサイズ
+            cmdEl.style.fontSize = "min(30vh, 80vw)";
+            cmdEl.style.color = "#00ff00"; 
+
+            const voiceMap = {
+                "左前": "ひだりまえ", "左上": "ひだりうえ", "左外": "ひだりそと", "左内": "ひだりうち", "左後": "ひだりうしろ",
+                "右前": "みぎまえ", "右上": "みぎうえ", "右外": "みぎそと", "右内": "みぎうち", "右後": "みぎうしろ"
+            };
+            speak(voiceMap[currentTarget] || currentTarget);
+        }
+
+        function endGame(isAborted = false) {
+            gameActive = false;
+            clearInterval(timerInterval);
+            const resultScreen = document.getElementById('result-screen');
+            resultScreen.style.display = 'flex';
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('command-text').innerText = ""; 
+            
+            if(isAborted) {
+                speak("中断します");
+                startLockedAfterAbort = true; 
+            } else {
+                speak("終了です");
+            }
+        }
+
+        function onResults(results) {
+            canvasElement.width = results.image.width;
+            canvasElement.height = results.image.height;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            if (!gameActive) {
+                canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            } else {
+                canvasCtx.fillStyle = '#000';
+                canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+            }
+
+            if (results.poseLandmarks) {
+                const lm = results.poseLandmarks;
+                drawConnectors(canvasCtx, lm, POSE_CONNECTIONS, {color: gameActive ? '#333' : '#fff', lineWidth: 2});
+
+                const nose = lm[0], lWrist = lm[15], rWrist = lm[16];
+                const lAnkle = lm[27], rAnkle = lm[28];
+                const lKnee = lm[25], rKnee = lm[26];
+                const lToe = lm[31], rToe = lm[32]; 
+
+                const anyHandUp = (lWrist.y < nose.y) || (rWrist.y < nose.y);
+
+                if (gameActive) {
+                    if (anyHandUp) {
+                        if (handsUpStartTime === null) handsUpStartTime = Date.now();
+                        if (Date.now() - handsUpStartTime >= EXIT_HOLD_TIME) {
+                            endGame(true);
+                            handsUpStartTime = null;
+                        }
+                    } else {
+                        if (handsUpStartTime !== null && (Date.now() - handsUpStartTime < EXIT_HOLD_TIME)) {
+                            recordBasePosition(lm);
+                        }
+                        handsUpStartTime = null;
+                    }
+                }
+
+                if (!gameActive) {
+                    if (anyHandUp) {
+                        if (!startLockedAfterAbort) waitingForStartDown = true;
+                    } else {
+                        startLockedAfterAbort = false;
+                        if (waitingForStartDown) startGame(lm);
+                    }
+                }
+
+                if (gameActive) {
+                    const cmdEl = document.getElementById('command-text');
+
+                    if (isWaitingForReturn) {
+                        let canGoNext = false;
+                        const TOL = 0.08;
+
+                        if (currentTarget === "左前" || currentTarget === "右前") {
+                            const currentAnkleY = (currentTarget === "左前") ? lAnkle.y : rAnkle.y;
+                            const initAnkleY = (currentTarget === "左前") ? initialAnklePos.l.y : initialAnklePos.r.y;
+                            const thresholdY = initAnkleY - (initAnkleY - successAnkleY) * 0.5;
+                            if (currentAnkleY > thresholdY) canGoNext = true;
+                        } 
+                        else if (currentTarget === "左後" || currentTarget === "右後") {
+                            const currentToeY = (currentTarget === "左後") ? lToe.y : rToe.y;
+                            const initToeY = (currentTarget === "左後") ? initialToePos.l.y : initialToePos.r.y;
+                            if (Math.abs(currentToeY - initToeY) < 0.06) canGoNext = true;
+                        } 
+                        else {
+                            const isBackL = Math.abs(lKnee.y - initialKneePos.l.y) < TOL && Math.abs(lKnee.x - initialKneePos.l.x) < TOL;
+                            const isBackR = Math.abs(rKnee.y - initialKneePos.r.y) < TOL && Math.abs(rKnee.x - initialKneePos.r.x) < TOL;
+                            if (isBackL && isBackR) canGoNext = true;
+                        }
+
+                        if (canGoNext) {
+                            isWaitingForReturn = false;
+                            nextCommand();
+                        }
+                    } 
+                    else if (!isProcessingSuccess) {
+                        let success = false;
+                        const dy_k_l =  Math.abs(initialKneePos.l.y - lKnee.y); 
+                        const dy_k_r =  Math.abs(initialKneePos.r.y - rKnee.y);
+                        const dy_a_l = initialAnklePos.l.y - lAnkle.y; 
+                        const dy_a_r = initialAnklePos.r.y - rAnkle.y;
+                        const dz_t_l = lToe.z - initialToePos.l.z;
+                        const dz_t_r = rToe.z - initialToePos.r.z;
+
+                        const THR_UP = 0.08, THR_SIDE = 0.07, THR_FRONT = 0.025;
+                        const KNEE_LIMIT_STRICT = 0.035; 
+                        const Z_FRONT_TRIGGER = -0.1; 
+                        const Z_BACK_SAFE_ZONE = -0.08; 
+
+                        switch(currentTarget) {
+                            case "左前": 
+                                if (dy_a_l > THR_FRONT && dy_k_l < KNEE_LIMIT_STRICT && dz_t_l < Z_FRONT_TRIGGER) {
+                                    success = true;
+                                    successAnkleY = lAnkle.y;
+                                }
+                                break;
+                            case "左上": 
+                                if (dy_k_l > THR_UP && dy_a_l > THR_UP) success = true; 
+                                break;
+                            case "左外": if (lKnee.x > initialKneePos.l.x + THR_SIDE) success = true; break;
+                            case "左内": if (lKnee.x < initialKneePos.l.x - THR_SIDE) success = true; break;
+                            case "左後": 
+                                {
+                                    const oppGap = rToe.y - rAnkle.y;
+                                    const thresholdY = rToe.y - (oppGap * 0.66);
+                                    const isBackCondMet = (lToe.y < thresholdY && dy_k_l < KNEE_LIMIT_STRICT && dz_t_l > Z_BACK_SAFE_ZONE);
+                                    if (isBackCondMet) {
+                                        if (backHoldStartTime === null) backHoldStartTime = Date.now();
+                                        if (Date.now() - backHoldStartTime >= BACK_HOLD_TIME) success = true;
+                                    } else {
+                                        backHoldStartTime = null;
+                                    }
+                                }
+                                break;
+                            case "右前": 
+                                if (dy_a_r > THR_FRONT && dy_k_r < KNEE_LIMIT_STRICT && dz_t_r < Z_FRONT_TRIGGER) {
+                                    success = true;
+                                    successAnkleY = rAnkle.y;
+                                }
+                                break;
+                            case "右上": 
+                                if (dy_k_r > THR_UP && dy_a_r > THR_UP) success = true; 
+                                break;
+                            case "右外": if (rKnee.x < initialKneePos.r.x - THR_SIDE) success = true; break;
+                            case "右内": if (rKnee.x > initialKneePos.r.x + THR_SIDE) success = true; break;
+                            case "右後": 
+                                {
+                                    const oppGap = lToe.y - lAnkle.y;
+                                    const thresholdY = lToe.y - (oppGap * 0.66);
+                                    const isBackCondMet = (rToe.y < thresholdY && dy_k_r < KNEE_LIMIT_STRICT && dz_t_r > Z_BACK_SAFE_ZONE);
+                                    if (isBackCondMet) {
+                                        if (backHoldStartTime === null) backHoldStartTime = Date.now();
+                                        if (Date.now() - backHoldStartTime >= BACK_HOLD_TIME) success = true;
+                                    } else {
+                                        backHoldStartTime = null;
+                                    }
+                                }
+                                break;
+                        }
+
+                        if (success) {
+                            isProcessingSuccess = true; 
+                            backHoldStartTime = null; 
+                            score++;
+                            document.getElementById('val-score').innerText = score;
+                            playSound(1200, 0.2);
+                            cmdEl.innerText = "OK"; 
+                            cmdEl.style.fontSize = "min(30vh, 80vw)";
+                            cmdEl.style.color = "#ff0000"; 
+                            
+                            setTimeout(() => {
+                                isProcessingSuccess = false;
+                                isWaitingForReturn = true; 
+                                cmdEl.innerText = "戻して";
+                                cmdEl.style.color = "#ffff00";
+                                // 3文字のため、縦方向を考慮してサイズ比を抑制 (20vh * 3 = 60vh)
+                                cmdEl.style.fontSize = "min(20vh, 70vw)";
+                            }, 400);
+                        }
+                    }
+                }
+            }
+            canvasCtx.restore();
+        }
+
+        const pose = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
+        pose.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await pose.send({image: videoElement}); },
+            width: 1280, height: 720
+        });
+
+        function initApp() {
+            if (appInitialized) return;
+            audioCtx.resume();
+            appInitialized = true;
+            document.querySelector('.btn-start').style.display = 'none';
+            document.getElementById('start-screen').classList.add('preview-mode');
+            camera.start();
+        }
+    </script>
+</body>
+</html>
